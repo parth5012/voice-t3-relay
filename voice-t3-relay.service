@@ -1,0 +1,17 @@
+[Unit]
+Description=Voice to T3 Code Relay Daemon
+After=network.target t3.service
+Wants=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/voice-t3-relay
+ExecStart=/usr/bin/python3 %h/projects/voice-t3-relay/server.py
+Restart=always
+RestartSec=3
+EnvironmentFile=-%h/projects/voice-t3-relay/.env
+StandardOutput=append:%h/.local/share/voice-t3-relay/relay.log
+StandardError=append:%h/.local/share/voice-t3-relay/relay.log
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,38 @@
+{
+  "version": 4,
+  "categories": [
+    {
+      "id": "cat_t3_automation",
+      "name": "T3 Automation",
+      "shortcuts": [
+        {
+          "id": "sc_t3_voice_dump",
+          "name": "T3 Voice Thought",
+          "description": "Speak out your thought and dispatch to T3 Code",
+          "icon": "flat_color:microphone",
+          "method": "POST",
+          "url": "https://debian.tail46d59a.ts.net/voice-relay/capture",
+          "bodyType": "custom_text",
+          "bodyContent": "{\"text\": \"[[voice_thought]]\"}",
+          "contentType": "application/json",
+          "executionType": "app",
+          "feedback": "toast_simple",
+          "responseHandling": {
+            "successOutput": "none",
+            "failureOutput": "toast"
+          }
+        }
+      ]
+    }
+  ],
+  "variables": [
+    {
+      "id": "var_voice_thought",
+      "key": "voice_thought",
+      "type": "text",
+      "title": "Speak your thought...",
+      "message": "Dictate your thought. Mention a project if needed (e.g. 'In Vela, ...')",
+      "value": ""
+    }
+  ]
+}
