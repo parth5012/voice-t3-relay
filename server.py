@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Voice-to-T3 Relay Service
-Listens for voice transcripts from mobile, routes to project/machine,
+Listens for voice transcripts or raw audio recordings from mobile,
+transcribes via Groq Cloud Whisper, routes to project/machine,
 dispatches interactive ntfy notification, and launches T3 Code threads.
 """
 
@@ -17,6 +18,8 @@ import logging
 import subprocess
 import urllib.request
 import urllib.parse
+import email
+from email.policy import default
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -46,6 +49,8 @@ NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "t3-voice-parth-2026")
 NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh")
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "gemini-3.8-flash")
 DEFAULT_PROVIDER = os.environ.get("DEFAULT_PROVIDER", "antigravity")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "whisper-large-v3-turbo")
 SCRATCH_DIR = os.path.expanduser(os.environ.get("SCRATCH_DIR", "~/.t3/scratch"))
 PROJECTS_ROOT = os.path.expanduser(os.environ.get("PROJECTS_ROOT", "~/projects"))
 DATA_DIR = os.path.expanduser(os.environ.get("DATA_DIR", "~/.local/share/voice-t3-relay"))
@@ -148,6 +153,113 @@ def route_speech(text):
         "project_path": matched_path,
         "target_machine": machine
     }
+
+# --- Groq Cloud Whisper Transcription ---
+def transcribe_audio_groq(audio_bytes, filename="recording.mp3"):
+    if not GROQ_API_KEY:
+        raise ValueError("GROQ_API_KEY is not configured in .env or environment")
+
+    # If incoming file is .3gp / .3gpp or uncompressed, convert with ffmpeg to mp3
+    lower_fn = filename.lower()
+    if lower_fn.endswith(".3gp") or lower_fn.endswith(".3gpp") or lower_fn.endswith(".amr"):
+        try:
+            p = subprocess.Popen(
+                ["ffmpeg", "-y", "-i", "pipe:0", "-f", "mp3", "pipe:1"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            converted, err = p.communicate(input=audio_bytes)
+            if p.returncode == 0 and converted:
+                audio_bytes = converted
+                filename = "recording.mp3"
+                logging.info("Converted .3gp audio to mp3 using ffmpeg")
+            else:
+                logging.warning(f"ffmpeg conversion warning: {err.decode('utf-8', errors='ignore')}")
+        except Exception as e:
+            logging.warning(f"ffmpeg conversion failed: {e}")
+
+    boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
+    parts = []
+
+    # Model
+    parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{GROQ_MODEL}\r\n".encode("utf-8"))
+    # Response format
+    parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\njson\r\n".encode("utf-8"))
+    # Temperature
+    parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"temperature\"\r\n\r\n0.0\r\n".encode("utf-8"))
+    # Audio file
+    parts.append(
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n".encode("utf-8")
+        + audio_bytes
+        + b"\r\n"
+    )
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+
+    payload = b"".join(parts)
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/audio/transcriptions",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "User-Agent": "Voice-T3-Relay/1.1"
+        },
+        method="POST"
+    )
+
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            elapsed = time.time() - t0
+            text = data.get("text", "").strip()
+            logging.info(f"Groq Whisper ({GROQ_MODEL}) transcribed {len(audio_bytes)} bytes in {elapsed:.2f}s: '{text}'")
+            return text
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="ignore")
+        logging.error(f"Groq API HTTP error {e.code}: {err_body}")
+        raise RuntimeError(f"Groq API error ({e.code}): {err_body}")
+    except Exception as e:
+        logging.error(f"Groq API request failed: {e}")
+        raise
+
+def extract_audio_from_request(headers, raw_body):
+    content_type = headers.get("Content-Type", "")
+    filename = "recording.mp3"
+    audio_bytes = None
+
+    if "multipart/form-data" in content_type:
+        msg = email.message_from_bytes(
+            f"Content-Type: {content_type}\r\n\r\n".encode("utf-8") + raw_body,
+            policy=default
+        )
+        for part in msg.iter_parts():
+            fn = part.get_filename()
+            ct = part.get_content_type()
+            part_name = part.get_param("name", header="content-disposition")
+            if fn or ct.startswith("audio/") or part_name in ("file", "audio", "recording"):
+                audio_bytes = part.get_payload(decode=True)
+                if fn:
+                    filename = fn
+                break
+    else:
+        # Direct raw binary upload (audio/mpeg, audio/mp4, audio/wav, audio/ogg, audio/3gpp, etc.)
+        audio_bytes = raw_body
+        if "audio/wav" in content_type:
+            filename = "recording.wav"
+        elif "audio/m4a" in content_type or "audio/mp4" in content_type:
+            filename = "recording.m4a"
+        elif "audio/ogg" in content_type:
+            filename = "recording.ogg"
+        elif "audio/3gp" in content_type or "audio/3gpp" in content_type:
+            filename = "recording.3gp"
+        elif "audio/webm" in content_type:
+            filename = "recording.webm"
+        else:
+            filename = "recording.mp3"
+
+    return audio_bytes, filename
 
 # --- ntfy Dispatcher ---
 def send_ntfy_push(req_id, prompt_text, project_name, machine):
@@ -263,7 +375,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Auto-Launch")
         self.end_headers()
 
     def do_GET(self):
@@ -283,6 +395,8 @@ class RelayHandler(BaseHTTPRequestHandler):
                 "machine": CURRENT_MACHINE,
                 "tailscale_host": TAILSCALE_HOST,
                 "model": f"{DEFAULT_PROVIDER}:{DEFAULT_MODEL}",
+                "groq_configured": bool(GROQ_API_KEY),
+                "groq_model": GROQ_MODEL,
                 "ntfy_topic": NTFY_TOPIC,
                 "recent": recent
             })
@@ -482,15 +596,106 @@ class RelayHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path, params = self.parse_path()
         content_len = int(self.headers.get("Content-Length", "0"))
-        post_data = self.rfile.read(content_len).decode("utf-8")
+        raw_body = self.rfile.read(content_len)
 
+        # Check if auto_launch requested via query param or header
+        auto_launch = params.get("auto_launch", [""])[0].lower() in ("true", "1", "yes") or \
+                      self.headers.get("X-Auto-Launch", "").lower() in ("true", "1", "yes")
+
+        # --- Endpoint 1: Audio Capture (from MacroDroid / Tasker / Mobile) ---
+        if path == "/capture-audio":
+            if not GROQ_API_KEY:
+                self.send_json(400, {
+                    "error": "GROQ_API_KEY is not configured on the relay server. Please set it in .env to enable audio transcription."
+                })
+                return
+
+            if not raw_body:
+                self.send_json(400, {"error": "Empty audio payload received"})
+                return
+
+            try:
+                audio_bytes, filename = extract_audio_from_request(self.headers, raw_body)
+                if not audio_bytes:
+                    self.send_json(400, {"error": "Could not extract audio data from request"})
+                    return
+
+                # Transcribe with Groq Cloud Whisper
+                transcribed_text = transcribe_audio_groq(audio_bytes, filename=filename)
+                if not transcribed_text:
+                    self.send_json(400, {"error": "Groq transcription returned empty text"})
+                    return
+            except Exception as e:
+                logging.error(f"Audio transcription failed: {e}")
+                self.send_json(500, {"error": f"Transcription error: {str(e)}"})
+                return
+
+            # Route transcribed speech
+            parsed = route_speech(transcribed_text)
+            req_id = uuid.uuid4().hex[:8]
+
+            if auto_launch:
+                # Direct fire mode: start thread immediately
+                try:
+                    thread_id = launch_t3_thread(parsed["project_path"], parsed["prompt"])
+                    with sqlite3.connect(DB_PATH) as conn:
+                        conn.execute("""
+                            INSERT INTO prompts (id, raw_text, prompt, project_name, project_path, target_machine, status, thread_id, created_at, launched_at)
+                            VALUES (?, ?, ?, ?, ?, ?, 'launched', ?, ?, ?)
+                        """, (req_id, transcribed_text, parsed["prompt"], parsed["project_name"], parsed["project_path"], parsed["target_machine"], thread_id, time.time(), time.time()))
+                        conn.commit()
+
+                    send_ntfy_started(thread_id, parsed["project_name"], parsed["target_machine"], parsed["prompt"])
+                    self.send_json(200, {
+                        "ok": True,
+                        "id": req_id,
+                        "transcription": transcribed_text,
+                        "prompt": parsed["prompt"],
+                        "project": parsed["project_name"],
+                        "machine": parsed["target_machine"],
+                        "launched": True,
+                        "threadId": thread_id,
+                        "url": f"{T3_WEB_URL}/threads/{thread_id}"
+                    })
+                    return
+                except Exception as e:
+                    logging.error(f"Auto-launch failed: {e}")
+                    self.send_json(500, {"error": f"Auto-launch failed: {str(e)}"})
+                    return
+            else:
+                # Review / Confirm mode via ntfy push
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.execute("""
+                        INSERT INTO prompts (id, raw_text, prompt, project_name, project_path, target_machine, status, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+                    """, (req_id, transcribed_text, parsed["prompt"], parsed["project_name"], parsed["project_path"], parsed["target_machine"], time.time()))
+                    conn.commit()
+
+                send_ntfy_push(req_id, parsed["prompt"], parsed["project_name"], parsed["target_machine"])
+
+                self.send_json(200, {
+                    "ok": True,
+                    "id": req_id,
+                    "transcription": transcribed_text,
+                    "prompt": parsed["prompt"],
+                    "project": parsed["project_name"],
+                    "machine": parsed["target_machine"],
+                    "confirm_url": f"{PUBLIC_BASE_URL}/confirm?id={req_id}",
+                    "edit_url": f"{PUBLIC_BASE_URL}/edit?id={req_id}"
+                })
+                return
+
+        # --- Endpoint 2: Text Capture ---
         if path == "/capture":
+            post_data = raw_body.decode("utf-8", errors="replace")
             raw_text = ""
             content_type = self.headers.get("Content-Type", "")
             if "application/json" in content_type:
                 try:
                     payload = json.loads(post_data)
                     raw_text = payload.get("text") or payload.get("prompt", "")
+                    if "auto_launch" in payload:
+                        auto_launch = bool(payload["auto_launch"])
                 except Exception:
                     self.send_json(400, {"error": "Invalid JSON body"})
                     return
@@ -507,28 +712,56 @@ class RelayHandler(BaseHTTPRequestHandler):
             parsed = route_speech(raw_text)
             req_id = uuid.uuid4().hex[:8]
 
-            with sqlite3.connect(DB_PATH) as conn:
-                conn.execute("""
-                    INSERT INTO prompts (id, raw_text, prompt, project_name, project_path, target_machine, status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
-                """, (req_id, raw_text, parsed["prompt"], parsed["project_name"], parsed["project_path"], parsed["target_machine"], time.time()))
-                conn.commit()
+            if auto_launch:
+                try:
+                    thread_id = launch_t3_thread(parsed["project_path"], parsed["prompt"])
+                    with sqlite3.connect(DB_PATH) as conn:
+                        conn.execute("""
+                            INSERT INTO prompts (id, raw_text, prompt, project_name, project_path, target_machine, status, thread_id, created_at, launched_at)
+                            VALUES (?, ?, ?, ?, ?, ?, 'launched', ?, ?, ?)
+                        """, (req_id, raw_text, parsed["prompt"], parsed["project_name"], parsed["project_path"], parsed["target_machine"], thread_id, time.time(), time.time()))
+                        conn.commit()
 
-            # Push interactive notification to ntfy
-            send_ntfy_push(req_id, parsed["prompt"], parsed["project_name"], parsed["target_machine"])
+                    send_ntfy_started(thread_id, parsed["project_name"], parsed["target_machine"], parsed["prompt"])
+                    self.send_json(200, {
+                        "ok": True,
+                        "id": req_id,
+                        "project": parsed["project_name"],
+                        "machine": parsed["target_machine"],
+                        "prompt": parsed["prompt"],
+                        "launched": True,
+                        "threadId": thread_id,
+                        "url": f"{T3_WEB_URL}/threads/{thread_id}"
+                    })
+                    return
+                except Exception as e:
+                    self.send_json(500, {"error": f"Auto-launch failed: {str(e)}"})
+                    return
+            else:
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.execute("""
+                        INSERT INTO prompts (id, raw_text, prompt, project_name, project_path, target_machine, status, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+                    """, (req_id, raw_text, parsed["prompt"], parsed["project_name"], parsed["project_path"], parsed["target_machine"], time.time()))
+                    conn.commit()
 
-            self.send_json(200, {
-                "ok": True,
-                "id": req_id,
-                "project": parsed["project_name"],
-                "machine": parsed["target_machine"],
-                "prompt": parsed["prompt"],
-                "confirm_url": f"{PUBLIC_BASE_URL}/confirm?id={req_id}",
-                "edit_url": f"{PUBLIC_BASE_URL}/edit?id={req_id}"
-            })
-            return
+                # Push interactive notification to ntfy
+                send_ntfy_push(req_id, parsed["prompt"], parsed["project_name"], parsed["target_machine"])
 
+                self.send_json(200, {
+                    "ok": True,
+                    "id": req_id,
+                    "project": parsed["project_name"],
+                    "machine": parsed["target_machine"],
+                    "prompt": parsed["prompt"],
+                    "confirm_url": f"{PUBLIC_BASE_URL}/confirm?id={req_id}",
+                    "edit_url": f"{PUBLIC_BASE_URL}/edit?id={req_id}"
+                })
+                return
+
+        # --- Endpoint 3: Mobile Glass Form Submit ---
         if path == "/edit-submit":
+            post_data = raw_body.decode("utf-8", errors="replace")
             form = urllib.parse.parse_qs(post_data)
             req_id = form.get("id", [""])[0]
             new_prompt = form.get("prompt", [""])[0].strip()
@@ -575,6 +808,7 @@ def run():
     logging.info(f"Starting Voice T3 Relay on port {PORT}...")
     logging.info(f"Tailscale Public URL: {PUBLIC_BASE_URL}")
     logging.info(f"ntfy server: {NTFY_SERVER}, topic: {NTFY_TOPIC}")
+    logging.info(f"Groq Whisper configured: {'YES (' + GROQ_MODEL + ')' if GROQ_API_KEY else 'NO (Set GROQ_API_KEY to enable audio capture)'}")
     server = HTTPServer(("0.0.0.0", PORT), RelayHandler)
     server.serve_forever()
 

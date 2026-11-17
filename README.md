@@ -7,42 +7,54 @@
 
 ## ⚡ Overview
 
-Constantly context-switching between mobile devices and desktop development environments drains focus. **Voice-to-T3 Relay** allows you to tap a gesture on your phone, speak out raw ideas or feature requests, and automatically dispatch them into T3 Code agent threads.
+Constantly context-switching between mobile devices and desktop development environments drains focus. **Voice-to-T3 Relay** allows you to tap a floating bubble or gesture on your phone, speak out raw ideas or feature requests, and automatically dispatch them into T3 Code agent threads.
 
 ```
-                  ┌──────────────────────────────────────────────┐
-                  │                 MOBILE PHONE                 │
-                  │  (Wispr Flow / Vela Voice / HTTP Shortcuts)  │
-                  └──────────────────────┬───────────────────────┘
-                                         │ POST /capture (Tailscale)
-                                         ▼
-                  ┌──────────────────────────────────────────────┐
-                  │            VOICE T3 RELAY DAEMON             │
-                  │        (Fast, lightweight Python/SQLite)     │
-                  └──────────────┬───────────────────────────────┘
+                  ┌────────────────────────────────────────────────────────┐
+                  │                      MOBILE PHONE                      │
+                  │   (MacroDroid Floating Bubble / 2-Click Audio Record)  │
+                  └───────────────────────────┬────────────────────────────┘
+                                              │ POST audio file (.mp3 / .m4a)
+                                              ▼
+                  ┌────────────────────────────────────────────────────────┐
+                  │                 VOICE T3 RELAY DAEMON                  │
+                  │             (Debian Host over Tailscale)               │
+                  └──────────────┬──────────────────────────┬──────────────┘
+                                 │                          │
+                                 ▼                          ▼
+                  ┌─────────────────────────────┐ ┌──────────────────┐
+                  │      Groq Cloud Whisper     │ │  ntfy Push Card  │
+                  │  (whisper-large-v3-turbo)   │ │  - 🚀 Send Now   │
+                  │       ~250ms latency        │ │  - 📝 Edit Glass │
+                  └──────────────┬──────────────┘ │  - ❌ Discard    │
+                                 │                └──────────────────┘
+                                 ▼                          │
+                  ┌─────────────────────────────┐           │
+                  │   Intelligent Router Engine ◄───────────┘
+                  │  (Matches "In Vela...", etc.)
+                  └──────────────┬──────────────┘
                                  │
-         ┌───────────────────────┴────────────────────────┐
-         ▼                                                ▼
-┌──────────────────┐                            ┌──────────────────┐
-│  ntfy Push Card  │                            │  T3 Code Agent   │
-│  - 🚀 Send Now   │                            │  Thread Start    │
-│  - 📝 Edit Glass │                            │  (Model & Repo)  │
-│  - ❌ Discard    │                            └──────────────────┘
-└──────────────────┘
+                                 ▼
+                  ┌─────────────────────────────┐
+                  │     T3 Code Autonomous      │
+                  │        Agent Thread         │
+                  └─────────────────────────────┘
 ```
 
 ---
 
 ## ✨ Features
 
+- **⚡ Blazing Fast Cloud Transcription:** Uses Groq's LPUs running `whisper-large-v3-turbo` for near-instant (~250ms) speech-to-text with industry-leading code & technical vocabulary accuracy.
+- **🔴 2-Click Floating Bubble on Mobile:** Tap floating bubble once to record, tap again to beam audio directly to your private relay. Zero screen or app switching required.
 - **🗣️ Natural Voice Thought Routing:** Speak naturally (e.g. *"In Vela, refactor websocket reconnection logic"* or *"On desktop, run benchmark suite"*). The relay strips prefixes, detects target projects, and chooses the right host.
 - **📲 Interactive Push Cards (ntfy):** Instantly receive actionable push notifications with three buttons:
   - **🚀 Send Now:** Spawns the thread immediately in the background without opening any app.
   - **📝 Edit / Review:** Opens an Aurora glass mobile web UI to adjust prompt text or change target workspaces.
   - **❌ Discard:** Cancels the draft.
+  - *(Optional `auto_launch=true` mode also available for instant fire without confirmation).*
 - **🔒 Secure by Design:** Operates over your private Tailscale network (`tailscale serve`) with zero open public ports required.
 - **🤖 Automatic Model Provisioning:** Spawns threads with your preferred default models (e.g., `antigravity:gemini-3.8-flash`) and target workspace isolation.
-- **⚡ Zero External Dependencies:** Built with pure Python standard library and SQLite.
 
 ---
 
@@ -68,9 +80,13 @@ NTFY_SERVER=https://ntfy.sh
 NTFY_TOPIC=your-secret-ntfy-topic
 DEFAULT_PROVIDER=antigravity
 DEFAULT_MODEL=gemini-3.8-flash
+GROQ_API_KEY=gsk_your_groq_api_key_here
+GROQ_MODEL=whisper-large-v3-turbo
 PROJECTS_ROOT=~/projects
 SCRATCH_DIR=~/.t3/scratch
 ```
+
+> **Tip:** You can generate a free Groq API key in 30 seconds at [console.groq.com/keys](https://console.groq.com/keys).
 
 ### 3. Install & Start Daemon
 
@@ -96,30 +112,41 @@ Test your setup:
 
 ---
 
-## 📱 Mobile Setup Guide
+## 📱 Mobile Floating Bubble Setup (MacroDroid)
 
-### 1. Subscribe to Notifications (ntfy)
-1. Install **ntfy** from the Play Store / App Store (or open `https://ntfy.sh/<your-topic>` in your browser).
-2. Subscribe to your configured topic (e.g., `t3-voice-parth-2026`).
+The recommended mobile client is **MacroDroid** (Free on Google Play Store). It gives you a persistent floating circle over any app that records and uploads in two taps.
 
-### 2. HTTP Shortcuts App (Android)
-1. Install **HTTP Shortcuts** by *Waboodoo* from [Google Play](https://play.google.com/store/apps/details?id=ch.rmy.android.http_shortcuts) or [F-Droid](https://f-droid.org/en/packages/ch.rmy.android.http_shortcuts/).
-2. Open the app → Tap **(⋮) Menu** → **Import / Export** → **Import from file**.
-3. Select [`http-shortcuts-t3-voice.json`](http-shortcuts-t3-voice.json).
-4. Verify the URL matches `https://<YOUR_TAILSCALE_HOST>/voice-relay/capture`.
+### Step 1: Install MacroDroid & ntfy
+1. Install **MacroDroid** from Google Play.
+2. Install **ntfy** from Google Play and subscribe to your `NTFY_TOPIC`.
 
-### 3. Wispr Flow & Voice Integration Options
+### Step 2: Configure the 2-Click Macro
 
-#### Option A: Wispr Flow Dictation + Android Share Sheet
-1. Dictate your thoughts freely in **Wispr Flow** or **Vela Voice**.
-2. Tap **Share** → Select **HTTP Shortcuts (T3 Voice Thought)**.
-3. The shortcut immediately `POST`s the speech transcript to your relay.
+1. In MacroDroid, tap **Add Macro** and name it `T3 Voice Bubble`.
+2. **Local Variable**: Tap `Variables` tab → Add a boolean variable named `is_recording` (default: `false`).
+3. **Trigger**:
+   * Tap `+` → **MacroDroid Specific** → **Floating Button**.
+   * Choose an icon (e.g. microphone), size, and set to persistent overlay.
+4. **Actions**:
+   * Add **Condition / If-Else Clause**:
+     * `If (is_recording == false)`:
+       * Set variable `is_recording = true`
+       * `Media` → `Record Audio` → destination `/sdcard/recording.mp3`
+       * `MacroDroid Specific` → `Configure Floating Button` → Change color to **Red**
+       * `Notification` → `Vibrate` (short 100ms buzz)
+     * `Else`:
+       * Set variable `is_recording = false`
+       * `Media` → `Record Audio Stop`
+       * `Connectivity` → `HTTP Request`:
+         * **Method:** `POST`
+         * **URL:** `https://<YOUR_TAILSCALE_HOST>/voice-relay/capture-audio`
+         * **Content-Type:** `multipart/form-data`
+         * **File Attachment:** `/sdcard/recording.mp3` (field name: `file`)
+       * `MacroDroid Specific` → `Configure Floating Button` → Change color back to **Blue/Default**
+       * `Notification` → `Vibrate` (two short pulses)
+5. Save the Macro. Grant MacroDroid the standard Android *Display over other apps* and *Microphone* permissions.
 
-#### Option B: Wispr Flow Keyboard / Mic + Quick Settings Tile
-1. Add the **HTTP Shortcuts** tile to your phone's Quick Settings toggles (or bind it to a **Back Tap / Double-tap Power** gesture).
-2. Tapping it opens a quick prompt.
-3. Dictate using Wispr Flow (or the keyboard microphone).
-4. Tap Send. The notification card arrives with one-tap confirmation!
+Now, whenever inspiration strikes, tap the floating bubble once, speak your mind, tap it again, and your desktop agent starts working!
 
 ---
 
@@ -127,8 +154,9 @@ Test your setup:
 
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
-| `/health` | `GET` | Service status, current host, active model, and recent prompt history. |
-| `/capture` | `POST` | Ingests spoken text. Accepts `application/json` (`{"text": "..."}`), `application/x-www-form-urlencoded`, or `text/plain`. |
+| `/health` | `GET` | Service status, active model, Groq configuration state, and recent prompt history. |
+| `/capture-audio` | `POST` | Ingests audio files (`.mp3`, `.m4a`, `.wav`, `.ogg`, `.3gp`). Transcribes via Groq Cloud Whisper and routes to project. Supports `?auto_launch=true`. |
+| `/capture` | `POST` | Ingests plain text or JSON (`{"text": "..."}`). |
 | `/confirm?id=<ID>` | `GET` | Executes thread launch in T3 Code and redirects or returns JSON with thread ID. |
 | `/edit?id=<ID>` | `GET` | Serves the Aurora mobile glass web UI to tweak prompt text and target project. |
 | `/edit-submit` | `POST` | Submits edited prompt and launches the T3 thread. |
@@ -140,7 +168,7 @@ Test your setup:
 
 ```
 voice-t3-relay/
-├── server.py                     # Core relay server & routing engine
+├── server.py                     # Core relay server, Groq Whisper engine & router
 ├── voice-t3-relay.service        # Systemd user service unit
 ├── http-shortcuts-t3-voice.json  # Mobile shortcut export template
 ├── install.sh                    # Automated systemd installer script

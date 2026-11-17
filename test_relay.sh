@@ -7,16 +7,27 @@ if [ -n "$TAILSCALE_HOST" ]; then
 fi
 
 echo "=== 1. Checking Relay Service Health on $BASE_URL ==="
-curl -sf "${BASE_URL}/health" | jq .
+HEALTH=$(curl -sf "${BASE_URL}/health")
+echo "$HEALTH" | jq .
 
-echo -e "\n=== 2. Simulating Capture (Scratch fallback) ==="
+echo -e "\n=== 2. Simulating Text Capture ==="
 RES=$(curl -sf -X POST "${BASE_URL}/capture" \
   -H "Content-Type: application/json" \
-  -d '{"text": "Research latest WebGPU specifications for mobile browsers"}')
+  -d '{"text": "In Vela, add latency ratchet metrics to websocket"}')
 echo "$RES" | jq .
 
 ID=$(echo "$RES" | jq -r .id)
 
 echo -e "\n=== 3. Simulating Discard ==="
 curl -sf "${BASE_URL}/discard?id=$ID"
-echo -e "\nDone. Test passed!"
+
+echo -e "\n=== 4. Testing Audio Capture Endpoint (/capture-audio) ==="
+# Generate dummy 1s mp3
+ffmpeg -y -f lavfi -i "sine=frequency=1000:duration=1" -c:a libmp3lame /tmp/test_beep.mp3 >/dev/null 2>&1
+
+AUDIO_RES=$(curl -s -X POST "${BASE_URL}/capture-audio" \
+  -F "file=@/tmp/test_beep.mp3")
+echo "$AUDIO_RES" | jq . || echo "$AUDIO_RES"
+rm -f /tmp/test_beep.mp3
+
+echo -e "\nDone. Test completed successfully!"
